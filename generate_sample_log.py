@@ -44,6 +44,13 @@ for _ in range(6):
     log(t, f"Failed password for root from 198.51.100.7 port {port()} ssh2")
     t += timedelta(minutes=10)
 
+# 5. Successful brute force: 8 fast failures, then the attacker gets in
+t = START + timedelta(hours=4)
+for _ in range(8):
+    log(t, f"Failed password for admin from 198.51.100.23 port {port()} ssh2")
+    t += timedelta(seconds=2)
+log(t, f"Accepted password for admin from 198.51.100.23 port {port()} ssh2")
+
 lines.sort(key=lambda x: x[0])
 os.makedirs("sample_logs", exist_ok=True)
 with open("sample_logs/auth.log", "w", newline="\n") as f:
