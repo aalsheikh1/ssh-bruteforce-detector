@@ -16,6 +16,11 @@ FAILED_RE = re.compile(
     r"Failed password for (?:invalid user )?(?P<user>\S+) "
     r"from (?P<ip>[0-9a-fA-F.:]+) port \d+"
 )
+# Successful logins: "Accepted password for admin from 1.2.3.4 port 22 ssh2"
+ACCEPTED_RE = re.compile(
+    r"Accepted (?:password|publickey) for (?P<user>\S+) "
+    r"from (?P<ip>[0-9a-fA-F.:]+) port \d+"
+)
 # Classic syslog timestamp: "Oct 16 09:12:01"
 SYSLOG_TS_RE = re.compile(r"^([A-Z][a-z]{2}\s+\d{1,2} \d{2}:\d{2}:\d{2})")
 # Newer ISO timestamp (Ubuntu 23.10+): "2026-10-16T09:12:01.123456+00:00"
@@ -36,21 +41,27 @@ def parse_timestamp(line, year):
 
 
 def parse_log(path, year):
-    """Return a list of failed-login events from the log file."""
-    events = []
+    """Return (failed logins, successful logins) from the log file."""
+    events, successes = [], []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            if "Failed password" not in line:
+            if "Failed password" in line:
+                match, target = FAILED_RE.search(line), events
+            elif "Accepted " in line:
+                match, target = ACCEPTED_RE.search(line), successes
+            else:
                 continue
-            match = FAILED_RE.search(line)
             ts = parse_timestamp(line, year)
             if match and ts:
-                events.append({"time": ts, "ip": match["ip"], "user": match["user"]})
-    return events
+                target.append({"time": ts, "ip": match["ip"], "user": match["user"]})
+    return events, successes
 
 
-def detect(events, threshold, window):
-    """Flag IPs with >= threshold failures inside any `window`-second span."""
+def detect(events, successes, threshold, window):
+    """Flag IPs with >= threshold failures inside any `window`-second span.
+
+    A flagged IP that later logs in successfully is marked as a possible compromise.
+    """
     by_ip = defaultdict(list)
     for e in events:
         by_ip[e["ip"]].append(e)
@@ -70,6 +81,11 @@ def detect(events, threshold, window):
             users = sorted({e["user"] for e in evs})
             # Many distinct usernames suggests spraying rather than guessing one account
             technique = "T1110.003 Password Spraying" if len(users) >= 5 else "T1110.001 Password Guessing"
+            # A success after the attack started means the attacker probably got in
+            login = next((s for s in sorted(successes, key=lambda s: s["time"])
+                          if s["ip"] == ip and s["time"] >= evs[0]["time"]), None)
+            if login:
+                technique += " + T1078 Valid Accounts"
             findings.append({
                 "ip": ip,
                 "total_attempts": len(evs),
@@ -80,8 +96,12 @@ def detect(events, threshold, window):
                 "usernames": ", ".join(users[:8]) + (" ..." if len(users) > 8 else ""),
                 "default_accounts_targeted": ", ".join(u for u in users if u in DEFAULT_USERNAMES),
                 "mitre_technique": technique,
+                "compromised": "yes" if login else "no",
+                "compromised_user": login["user"] if login else "",
+                "compromised_at": login["time"].strftime("%Y-%m-%d %H:%M:%S") if login else "",
             })
-    findings.sort(key=lambda f: f["total_attempts"], reverse=True)
+    # Possible compromises first, then the noisiest attackers
+    findings.sort(key=lambda f: (f["compromised"] == "yes", f["total_attempts"]), reverse=True)
     return findings
 
 
@@ -94,9 +114,12 @@ def print_report(events, findings, threshold, window):
     print(f" Unique source IPs    : {unique_ips}")
     print(f" Rule                 : >= {threshold} failures in {window}s")
     print(f" IPs flagged          : {len(findings)}")
+    print(f" Possible compromises : {sum(f['compromised'] == 'yes' for f in findings)}")
     print("=" * 60)
     for f in findings:
         print(f"\n[!] {f['ip']}")
+        if f["compromised"] == "yes":
+            print(f"    !!! POSSIBLE COMPROMISE: logged in as '{f['compromised_user']}' at {f['compromised_at']}")
         print(f"    Attempts      : {f['total_attempts']} (peak {f['peak_in_window']} in {window}s)")
         print(f"    Active        : {f['first_seen']} -> {f['last_seen']}")
         print(f"    Usernames     : {f['unique_usernames']} unique ({f['usernames']})")
@@ -118,8 +141,8 @@ def main():
     parser.add_argument("--block", action="store_true", help="Print suggested ufw block rules")
     args = parser.parse_args()
 
-    events = parse_log(args.logfile, args.year)
-    findings = detect(events, args.threshold, args.window)
+    events, successes = parse_log(args.logfile, args.year)
+    findings = detect(events, successes, args.threshold, args.window)
     print_report(events, findings, args.threshold, args.window)
 
     if args.csv and findings:
