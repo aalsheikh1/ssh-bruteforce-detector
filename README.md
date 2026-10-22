@@ -7,6 +7,11 @@
 
 A Python tool that reads Linux SSH authentication logs, finds brute-force and password-spraying attacks, and maps them to the **MITRE ATT&CK** framework.
 
+It works in two modes:
+
+- 🔎 **Forensic** (`detector.py`): analyzes a saved log after the fact and writes a report.
+- 📡 **Live** (`live_monitor.py`): watches the log in real time, alerts the moment an attack starts, and can block the attacker automatically.
+
 It answers the questions an analyst asks first: *Who is attacking? How hard? Which accounts are they after? What kind of attack is it? **Did they get in?***
 
 ---
@@ -21,6 +26,8 @@ It answers the questions an analyst asks first: *Who is attacking? How hard? Whi
 | 👤 Default account check | Highlights targeted default usernames like `root`, `admin`, `pi` |
 | 🧾 CSV export | Saves findings for spreadsheets or a SIEM |
 | 🧱 Response suggestions | Prints ready-to-review `ufw` block rules for each attacker |
+| 📡 Live monitoring | Follows the log like `tail -f` and alerts in real time |
+| 🛑 Automatic blocking | Blocks attackers with `ufw` (off by default, with an allowlist so you can't lock yourself out) |
 | 🕒 Two log formats | Supports classic syslog and newer ISO timestamps |
 | 📦 No dependencies | Python standard library only |
 
@@ -46,6 +53,52 @@ python detector.py sample_logs/auth.log --csv findings.csv --block
 | `-y`, `--year` | current year | Year for syslog timestamps that don't include one |
 | `--csv FILE` | – | Save findings to a CSV file |
 | `--block` | off | Print suggested `ufw` block rules |
+
+---
+
+## 📡 Live Monitoring
+
+Run on the Linux server you want to protect:
+
+```bash
+# Dry run (default): alerts only, nothing is blocked
+sudo python3 live_monitor.py /var/log/auth.log
+
+# Systems that only use journald
+sudo journalctl -u ssh -f -o short | sudo python3 live_monitor.py -
+
+# Real blocking: ALWAYS allowlist your own IP first
+sudo python3 live_monitor.py /var/log/auth.log --block --allow <your-ip>
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-t`, `--threshold` | `5` | Failed logins needed to alert |
+| `-w`, `--window` | `60` | Time window in seconds |
+| `--block` | off | Block attackers with `ufw` (needs root) |
+| `--allow IP/CIDR ...` | loopback | IPs or ranges that are never blocked |
+| `--alert-log FILE` | `alerts.log` | Where alerts are saved |
+
+**Example (dry run, simulated attack):**
+
+```text
+[*] Blocking is OFF (dry run). Allowlisted: 127.0.0.0/8, ::1/128, 192.168.1.0/24
+[-] 23:44:54 failed login: user=root ip=203.0.113.45 (4 in window)
+[-] 23:44:55 failed login: user=root ip=203.0.113.45 (5 in window)
+
+[!] 2026-10-21 23:44:55 ALERT T1110 brute force from 203.0.113.45 (5 failures in 60s, last user=root)
+    [i] Dry run: would run 'ufw insert 1 deny from 203.0.113.45'
+
+[!] 2026-10-21 23:44:55 ALERT T1078 POSSIBLE COMPROMISE: 203.0.113.45 logged in as 'root' after brute force
+    [i] Investigate this account now: check its sessions and change its password
+```
+
+**Safety by design:**
+- Blocking is **off by default**. You have to opt in with `--block`.
+- Loopback and allowlisted IPs are **never blocked**.
+- Every IP is **validated** before it reaches `ufw`, so crafted log lines can't inject commands.
+- Deny rules are inserted **at the top** (`ufw insert 1`), so an existing `allow 22` rule can't override them.
+- The monitor keeps working if the log is **rotated**.
 
 ---
 
@@ -142,12 +195,17 @@ A wider window catches stealthier attackers but also raises the risk of **false 
 - **Syslog timestamps have no year,** so the year is assumed. Logs that span New Year may be out of order.
 - **Only `Failed password` lines are read.** Other failure types, like public key or PAM errors, are not counted yet.
 - **Distributed attacks** from many IPs, each staying under the threshold, are not linked together.
+- **Live mode counts time by when lines arrive,** not by the timestamp inside the log line.
+- **Blocks are permanent** until removed (`sudo ufw delete deny from <ip>`). There is no automatic unblock yet.
+- **Automatic blocking needs Linux with `ufw`.** So far it has only been tested in dry-run mode against simulated attacks.
 
 ---
 
 ## 🗺️ Roadmap
 
-- [ ] Live monitoring mode with automatic `ufw` blocking and an allowlist
+- [x] Live monitoring mode with automatic `ufw` blocking and an allowlist
+- [ ] Test automatic blocking on a real Linux server
+- [ ] Automatic unblock after a set time
 - [ ] GeoIP lookup for flagged IPs
 - [ ] Findings from a real internet-facing server
 - [ ] Detection of distributed attacks across multiple IPs
