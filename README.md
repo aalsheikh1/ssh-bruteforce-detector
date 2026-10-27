@@ -102,6 +102,94 @@ sudo python3 live_monitor.py /var/log/auth.log --block --allow <your-ip>
 
 ---
 
+## 🧪 Testing on a Real Server
+
+Use this to prove automatic blocking works end to end. Only test on a machine **you own**.
+
+### What you need
+
+- A Linux server or VM you control (Ubuntu recommended) with `python3` and `ufw`
+- **A second network to "attack" from**, such as a phone hotspot or a second VM. Testing from your own IP either gets allowlisted (nothing is blocked) or locks you out.
+- **Backup access**, such as your cloud provider's web console, in case you block yourself
+
+> ⚠️ **Password logins must be on.** The tool reads `Failed password` lines. Many cloud images turn password login off (key-only), and then those lines never appear. A local VirtualBox VM is the easiest place to run this test. Don't turn on password login on an internet-facing server just for a demo.
+
+### 1. Set up the firewall
+
+```bash
+sudo ufw allow OpenSSH     # keep SSH reachable
+sudo ufw enable
+sudo ufw status
+```
+
+### 2. Get the tool
+
+```bash
+git clone https://github.com/aalsheikh1/ssh-bruteforce-detector.git
+cd ssh-bruteforce-detector
+```
+
+### 3. Find the IP you manage the server from
+
+Run on **your own computer**, not the test network:
+
+```bash
+curl -4 ifconfig.me
+```
+
+### 4. Start the monitor with blocking on
+
+```bash
+sudo python3 live_monitor.py /var/log/auth.log --block --allow <your-ip>
+```
+
+No `/var/log/auth.log`? Use journald instead:
+
+```bash
+sudo journalctl -u ssh -f -o short | sudo python3 live_monitor.py - --block --allow <your-ip>
+```
+
+### 5. Trigger it from the second network
+
+Try to log in with a wrong password **5 times**:
+
+```bash
+ssh -o PubkeyAuthentication=no fakeuser@<server-ip>
+```
+
+**Expected in the monitor:**
+
+```text
+[!] ALERT T1110 brute force from <test-ip> (5 failures in 60s, last user=fakeuser)
+    [+] Blocked <test-ip> with ufw
+```
+
+The next `ssh` attempt from the test network should now hang or time out.
+
+### 6. Check the block
+
+```bash
+sudo ufw status numbered   # the DENY rule for <test-ip> should be at the top
+cat alerts.log
+```
+
+### 7. Test the compromise alert (dry run)
+
+Run the monitor **without** `--block`, fail 5 times from the test network, then log in **correctly** with a real account. You should see `ALERT T1078 POSSIBLE COMPROMISE`.
+
+### 8. Clean up
+
+```bash
+sudo ufw delete deny from <test-ip>
+rm alerts.log
+```
+
+### 9. Record it
+
+Record a short screen capture of steps 4–6 and add it to this README as proof. **Before sharing, hide your server's real IP and hostname.**
+
+---
+
 ## 📊 Sample Output
 
 ```text
